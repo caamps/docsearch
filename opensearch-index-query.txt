@@ -1,0 +1,16 @@
+PUT /files
+{
+  "mappings": {
+    "properties": {
+      "file": {
+        "type": "text"
+      },
+      "text": {
+        "type": "text"
+      }
+    }
+  }
+}
+
+
+GET /files/_search?q=text:pesquisar&filter_path=hits.hits._source.file
