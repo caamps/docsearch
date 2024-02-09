@@ -1,0 +1,281 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  MasterUserName:
+    Type: String
+    Description: "OpenSearch master user username"
+    MinLength: 1
+    MaxLength: 64
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    Default: "admin"
+
+  MasterUserPass:
+    Type: String
+    NoEcho: true
+    Description: "OpenSearch master user password"
+    MinLength: 8
+    MaxLength: 64
+    Default: "Admin123*"
+
+  InputBucketName:
+    Type: String
+    Description: "Name for input bucket"
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: "[a-z0-9.-]+"
+    Default: "ds-input-bucket"
+  
+  OutputBucketName:
+    Type: String
+    Description: "Name for output bucket"
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: "[a-z0-9.-]+"
+    Default: "ds-output-bucket"
+
+  CodeBucketName:
+    Type: String
+    Description: "Name for code bucket"
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: "[a-z0-9.-]+"
+    Default: "codebucket-1251"
+
+
+Resources:
+  
+  OpenSearchServiceDomain:
+    Type: 'AWS::OpenSearchService::Domain'
+    Properties:
+      DomainName: ds-opensearch-domain
+      EngineVersion: OpenSearch_2.11
+      ClusterConfig:
+        InstanceCount: 1
+        InstanceType: t3.small.search
+      EBSOptions:
+        EBSEnabled: true
+        VolumeSize: 10
+        VolumeType: gp2
+      NodeToNodeEncryptionOptions:
+        Enabled: true
+      EncryptionAtRestOptions:
+        Enabled: true
+      DomainEndpointOptions:
+        EnforceHTTPS: true  
+      AdvancedSecurityOptions:
+        Enabled: true
+        InternalUserDatabaseEnabled: true
+        MasterUserOptions:
+          MasterUserName: !Ref MasterUserName
+          MasterUserPassword: !Ref MasterUserPass
+      AccessPolicies:
+        Version: '2012-10-17'
+        Statement:
+          Effect: Allow
+          Principal:
+            AWS: '*'
+          Action: 'es:*'
+          Resource:
+            Fn::Sub: arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/ds-opensearch-domain/*
+  
+  InputBucket:
+    Type: 'AWS::S3::Bucket'
+    DependsOn: InputBucketPermission
+    Properties:
+      BucketName: !Ref InputBucketName
+      NotificationConfiguration:
+        LambdaConfigurations:
+        - Event: 's3:ObjectCreated:*'
+          Function: !GetAtt ExtractionLambdaFunction.Arn
+          Filter:
+            S3Key:
+              Rules:
+                - Name: suffix
+                  Value: .pdf
+        - Event: 's3:ObjectCreated:*'
+          Function: !GetAtt ExtractionLambdaFunction.Arn
+          Filter:
+            S3Key:
+              Rules:
+                - Name: suffix
+                  Value: .png
+        - Event: 's3:ObjectCreated:*'
+          Function: !GetAtt ExtractionLambdaFunction.Arn
+          Filter:
+            S3Key:
+              Rules:
+                - Name: suffix
+                  Value: .jpeg
+        - Event: 's3:ObjectCreated:*'
+          Function: !GetAtt ExtractionLambdaFunction.Arn
+          Filter:
+            S3Key:
+              Rules:
+                - Name: suffix
+                  Value: .jpg
+
+  InputBucketPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref ExtractionLambdaFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref "AWS::AccountId"
+      SourceArn: !Sub "arn:aws:s3:::${InputBucketName}"
+
+  OutputBucket:
+    Type: 'AWS::S3::Bucket'
+    DependsOn: OutputBucketPermission
+    Properties:
+      BucketName: !Ref OutputBucketName
+      NotificationConfiguration:
+        LambdaConfigurations:
+        - Event: 's3:ObjectCreated:*'
+          Function: !GetAtt IngestionLambdaFunction.Arn
+  
+  OutputBucketPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref IngestionLambdaFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref "AWS::AccountId"
+      SourceArn: !Sub "arn:aws:s3:::${OutputBucketName}"
+
+  ExtractionLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: extractionLambdaRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ExtractionLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                  - textract:*
+                  - sns:*
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+  
+  IngestionLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ingestionLambdaRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaS3TextractSNSPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:Get*
+                  - s3:List*
+                  - s3:Describe*
+                  - s3-object-lambda:Get*
+                  - s3-object-lambda:List*
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  TextractServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: textractRoleCloudformation
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: textract.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: TextractServicePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  "arn:aws:sns:*:*:AmazonTextract*"
+
+  LambdaSNSPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt ExtractionLambdaFunction.Arn
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref SNSTopic
+
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: AmazonTextractSNSTopic
+  
+  SNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: lambda
+      TopicArn: !Ref SNSTopic
+      Endpoint: !GetAtt ExtractionLambdaFunction.Arn
+
+  ExtractionLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt ExtractionLambdaRole.Arn
+      FunctionName: ds-extraction-fn
+      Code:
+        S3Bucket: !Ref CodeBucketName
+        S3Key: extractioncode.zip
+      Runtime: python3.11
+      Timeout: 60
+      MemorySize: 256
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          OutputBucket: !Ref OutputBucketName
+          TextractRoleArn: !GetAtt TextractServiceRole.Arn
+          SNSTopicArn: !Ref SNSTopic
+  
+  IngestionLambdaFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: OpenSearchServiceDomain
+    Properties:
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt IngestionLambdaRole.Arn
+      FunctionName: ds-ingestion-fn
+      Code:
+        S3Bucket: !Ref CodeBucketName
+        S3Key: ingestioncode.zip
+      Runtime: python3.11
+      Timeout: 60
+      MemorySize: 256
+      TracingConfig:
+        Mode: Active
+      Environment: 
+        Variables:
+          ESMasterUser: !Ref MasterUserName
+          ESMasterPass: !Ref MasterUserPass
+          ESEndpoint: !GetAtt OpenSearchServiceDomain.DomainEndpoint  
+
